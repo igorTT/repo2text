@@ -1,1 +1,16 @@
 repo-to-text
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+go.work
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+repo_contents.txt

@@ -5,10 +5,10 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/gobwas/glob"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +21,16 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			repoPath := args[0]
-			err := convertRepoToText(repoPath, outputFile)
+
+			// Add debug prints
+			absPath, err := filepath.Abs(repoPath)
+			if err != nil {
+				fmt.Printf("Error getting absolute path: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Processing path: %s\n", absPath)
+
+			err = convertRepoToText(repoPath, outputFile)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
@@ -31,27 +40,29 @@ func main() {
 	}
 
 	rootCmd.Flags().StringVarP(&outputFile, "output", "o", "repo_contents.txt", "Output file name")
-	rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 }
 
 func convertRepoToText(repoPath, outputFile string) error {
+	fmt.Printf("Starting to process repository: %s\n", repoPath) // Debug print
+
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
 		return fmt.Errorf("repository path %s does not exist", repoPath)
 	}
 
 	// Get file tree and contents
+	fmt.Println("Getting file tree...") // Debug print
 	fileTree, err := getFileTreeAndContents(repoPath)
 	if err != nil {
 		return err
 	}
-
-	// Get Git history
-	gitHistory, err := getGitHistory(repoPath)
-	if err != nil {
-		return err
-	}
+	fmt.Printf("Found %d entries\n", len(fileTree)) // Debug print
 
 	// Write output to file
+	fmt.Printf("Writing to output file: %s\n", outputFile) // Debug print
 	f, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -67,24 +78,45 @@ func convertRepoToText(repoPath, outputFile string) error {
 		writer.WriteString("\n")
 	}
 
-	writer.WriteString("\n# Git History\n\n")
-	writer.WriteString(gitHistory)
-
 	return nil
 }
 
 func getFileTreeAndContents(repoPath string) ([]string, error) {
+	// Load gitignore patterns
+	ignorePatterns, err := loadGitignorePatterns(repoPath)
+	if err != nil {
+		// Continue even if .gitignore can't be loaded
+		ignorePatterns = []glob.Glob{}
+	}
+
 	var fileTree []string
-	err := filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
+
 		// Skip directories
 		if info.IsDir() {
 			return nil
 		}
+
+		// Skip git history files
+		if strings.HasPrefix(path, ".git") {
+			return nil
+		}
+
+		// Check if file matches any gitignore pattern
 		relPath, _ := filepath.Rel(repoPath, path)
-		fileTree = append(fileTree, fmt.Sprintf("## %s", relPath))
+		for _, pattern := range ignorePatterns {
+			if pattern.Match(relPath) {
+				return nil // Skip this file
+			}
+		}
+
+		// Add separator and file name
+		fileTree = append(fileTree, "=====")
+		fileTree = append(fileTree, fmt.Sprintf("## filename: %s", relPath))
+		fileTree = append(fileTree, "=====")
 
 		// Read file contents
 		content, err := readFileContents(path)
@@ -133,13 +165,30 @@ func readFileContents(filePath string) (string, error) {
 	return content.String(), nil
 }
 
-func getGitHistory(repoPath string) (string, error) {
-	cmd := exec.Command("git", "-C", repoPath, "log", "--oneline")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
+func loadGitignorePatterns(repoPath string) ([]glob.Glob, error) {
+	gitignorePath := filepath.Join(repoPath, ".gitignore")
+	file, err := os.Open(gitignorePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to get Git history: %w", err)
+		return nil, err
 	}
-	return out.String(), nil
+	defer file.Close()
+
+	var patterns []glob.Glob
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Convert gitignore pattern to glob pattern
+		pattern := strings.Replace(line, "/", string(filepath.Separator), -1)
+		g, err := glob.Compile(pattern)
+		if err != nil {
+			continue // Skip invalid patterns
+		}
+		patterns = append(patterns, g)
+	}
+
+	return patterns, scanner.Err()
 }
